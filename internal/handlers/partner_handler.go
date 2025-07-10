@@ -90,4 +90,58 @@ func (h *PartnerHandler) Register(c *fiber.Ctx) error {
 		"partner": response,
 		"id":      result.InsertedID,
 	})
+}
+
+// Login handles partner login
+func (h *PartnerHandler) Login(c *fiber.Ctx) error {
+	var loginData struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+
+	if err := c.BodyParser(&loginData); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Invalid request body",
+		})
+	}
+
+	// Find partner by email
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var partner models.Partner
+	err := h.collection.FindOne(ctx, bson.M{"email": loginData.Email}).Decode(&partner)
+	if err == mongo.ErrNoDocuments {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "Email veya şifre hatalı",
+		})
+	}
+
+	// Compare passwords
+	err = bcrypt.CompareHashAndPassword([]byte(partner.Password), []byte(loginData.Password))
+	if err != nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "Email veya şifre hatalı",
+		})
+	}
+
+	// Create response without sensitive data
+	response := models.PartnerResponse{
+		ID:            partner.ID,
+		CompanyName:   partner.CompanyName,
+		Email:         partner.Email,
+		PhoneNumber:   partner.PhoneNumber,
+		Address:       partner.Address,
+		City:          partner.City,
+		BusinessType:  partner.BusinessType,
+		TaxNumber:     partner.TaxNumber,
+		ContactPerson: partner.ContactPerson,
+		CreatedAt:     partner.CreatedAt,
+		UpdatedAt:     partner.UpdatedAt,
+	}
+
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"message": "Giriş başarılı",
+		"partner": response,
+	})
 } 

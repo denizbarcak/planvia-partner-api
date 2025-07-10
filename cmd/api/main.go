@@ -40,6 +40,7 @@ func main() {
 	api := app.Group("/api")
 	partners := api.Group("/partners")
 	partners.Post("/register", partnerHandler.Register)
+	partners.Post("/login", partnerHandler.Login)
 
 	// Start server
 	log.Printf("Server starting on port %s", cfg.Port)
