@@ -2,146 +2,178 @@ package handlers
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"planvia-partner-api/internal/models"
 
+	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"golang.org/x/crypto/bcrypt"
 )
 
 type PartnerHandler struct {
 	collection *mongo.Collection
+	validate   *validator.Validate
 }
 
 func NewPartnerHandler(db *mongo.Database) *PartnerHandler {
 	return &PartnerHandler{
 		collection: db.Collection("partners"),
+		validate:   validator.New(),
 	}
 }
 
 func (h *PartnerHandler) Register(c *fiber.Ctx) error {
-	var partner models.Partner
-	if err := c.BodyParser(&partner); err != nil {
+	ctx, cancel := context.WithTimeout(c.Context(), 10*time.Second)
+	defer cancel()
+
+	// Parse request body
+	var req models.RegisterRequest
+	if err := c.BodyParser(&req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Invalid request body",
+			"error": "Geçersiz istek formatı",
 		})
 	}
 
-	// Validate required fields
-	if partner.CompanyName == "" || partner.Email == "" || partner.Password == "" {
+	// Log received data
+	fmt.Printf("Received registration request: %+v\n", req)
+
+	// Validate request data
+	if err := h.validate.Struct(req); err != nil {
+		validationErrors := err.(validator.ValidationErrors)
+		errorMessages := make([]string, len(validationErrors))
+		for i, e := range validationErrors {
+			errorMessages[i] = translateValidationError(e)
+		}
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Required fields are missing",
+			"error":   "Validation error",
+			"details": errorMessages,
 		})
 	}
 
 	// Check if email already exists
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	existingPartner := h.collection.FindOne(ctx, bson.M{"email": partner.Email})
+	existingPartner := h.collection.FindOne(ctx, bson.M{"email": req.Email})
 	if existingPartner.Err() != mongo.ErrNoDocuments {
 		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
-			"error": "Email already exists",
+			"error": "Bu e-posta adresi zaten kullanımda",
+		})
+	}
+
+	// Check if tax number already exists
+	existingPartner = h.collection.FindOne(ctx, bson.M{"tax_number": req.TaxNumber})
+	if existingPartner.Err() != mongo.ErrNoDocuments {
+		return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+			"error": "Bu vergi numarası zaten kullanımda",
 		})
 	}
 
 	// Hash password
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(partner.Password), bcrypt.DefaultCost)
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Failed to hash password",
+			"error": "Şifre işlenirken bir hata oluştu",
 		})
 	}
 
-	// Set timestamps
-	now := time.Now()
+	// Create partner from request
+	partner := req.ToPartner()
 	partner.Password = string(hashedPassword)
-	partner.CreatedAt = now
-	partner.UpdatedAt = now
 
 	// Insert partner
 	result, err := h.collection.InsertOne(ctx, partner)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-			"error": "Failed to create partner",
+			"error": "Partner kaydedilirken bir hata oluştu",
 		})
 	}
 
-	// Create response without sensitive data
-	response := models.PartnerResponse{
-		ID:            partner.ID,
-		CompanyName:   partner.CompanyName,
-		Email:         partner.Email,
-		PhoneNumber:   partner.PhoneNumber,
-		Address:       partner.Address,
-		City:          partner.City,
-		BusinessType:  partner.BusinessType,
-		TaxNumber:     partner.TaxNumber,
-		ContactPerson: partner.ContactPerson,
-		CreatedAt:     partner.CreatedAt,
-		UpdatedAt:     partner.UpdatedAt,
-	}
+	// Set ID from insert result
+	partner.ID = result.InsertedID.(primitive.ObjectID)
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-		"message": "Partner registered successfully",
-		"partner": response,
-		"id":      result.InsertedID,
+		"message": "İşletme başarıyla kaydedildi",
+		"partner": partner.ToResponse(),
 	})
 }
 
-// Login handles partner login
 func (h *PartnerHandler) Login(c *fiber.Ctx) error {
-	var loginData struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
+	ctx, cancel := context.WithTimeout(c.Context(), 10*time.Second)
+	defer cancel()
+
+	var req models.LoginRequest
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "Geçersiz istek formatı",
+		})
 	}
 
-	if err := c.BodyParser(&loginData); err != nil {
+	// Validate login data
+	if err := h.validate.Struct(req); err != nil {
+		validationErrors := err.(validator.ValidationErrors)
+		errorMessages := make([]string, len(validationErrors))
+		for i, e := range validationErrors {
+			errorMessages[i] = translateValidationError(e)
+		}
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error": "Invalid request body",
+			"error":   "Validation error",
+			"details": errorMessages,
 		})
 	}
 
 	// Find partner by email
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
 	var partner models.Partner
-	err := h.collection.FindOne(ctx, bson.M{"email": loginData.Email}).Decode(&partner)
+	err := h.collection.FindOne(ctx, bson.M{"email": req.Email}).Decode(&partner)
 	if err == mongo.ErrNoDocuments {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"error": "Email veya şifre hatalı",
+			"error": "E-posta veya şifre hatalı",
 		})
 	}
 
 	// Compare passwords
-	err = bcrypt.CompareHashAndPassword([]byte(partner.Password), []byte(loginData.Password))
+	err = bcrypt.CompareHashAndPassword([]byte(partner.Password), []byte(req.Password))
 	if err != nil {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"error": "Email veya şifre hatalı",
+			"error": "E-posta veya şifre hatalı",
 		})
-	}
-
-	// Create response without sensitive data
-	response := models.PartnerResponse{
-		ID:            partner.ID,
-		CompanyName:   partner.CompanyName,
-		Email:         partner.Email,
-		PhoneNumber:   partner.PhoneNumber,
-		Address:       partner.Address,
-		City:          partner.City,
-		BusinessType:  partner.BusinessType,
-		TaxNumber:     partner.TaxNumber,
-		ContactPerson: partner.ContactPerson,
-		CreatedAt:     partner.CreatedAt,
-		UpdatedAt:     partner.UpdatedAt,
 	}
 
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
 		"message": "Giriş başarılı",
-		"partner": response,
+		"partner": partner.ToResponse(),
 	})
+}
+
+func translateValidationError(e validator.FieldError) string {
+	switch e.Field() {
+	case "CompanyName":
+		return "İşletme adı zorunludur"
+	case "Email":
+		if e.Tag() == "required" {
+			return "E-posta adresi zorunludur"
+		}
+		return "Geçerli bir e-posta adresi giriniz"
+	case "Password":
+		if e.Tag() == "required" {
+			return "Şifre zorunludur"
+		}
+		return "Şifre en az 6 karakter olmalıdır"
+	case "PhoneNumber":
+		return "Telefon numarası zorunludur"
+	case "Address":
+		return "Adres zorunludur"
+	case "City":
+		return "Şehir seçimi zorunludur"
+	case "BusinessType":
+		return "İşletme kategorisi seçimi zorunludur"
+	case "TaxNumber":
+		return "Vergi numarası zorunludur"
+	case "ContactPerson":
+		return "Yetkili kişi bilgisi zorunludur"
+	default:
+		return fmt.Sprintf("%s alanı için %s kuralı geçerli değil", e.Field(), e.Tag())
+	}
 } 
