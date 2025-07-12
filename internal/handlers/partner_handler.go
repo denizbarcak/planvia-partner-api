@@ -5,10 +5,11 @@ import (
 	"fmt"
 	"time"
 
-	"planvia-partner-api/internal/models"
+	"github.com/denizbarcak/planvia-partner-api/internal/models"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
+	"github.com/golang-jwt/jwt"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -100,50 +101,69 @@ func (h *PartnerHandler) Register(c *fiber.Ctx) error {
 	})
 }
 
+// Login handles partner authentication
 func (h *PartnerHandler) Login(c *fiber.Ctx) error {
-	ctx, cancel := context.WithTimeout(c.Context(), 10*time.Second)
-	defer cancel()
+	var loginData struct {
+		Email    string `json:"email" validate:"required,email"`
+		Password string `json:"password" validate:"required"`
+	}
 
-	var req models.LoginRequest
-	if err := c.BodyParser(&req); err != nil {
+	if err := c.BodyParser(&loginData); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": "Geçersiz istek formatı",
 		})
 	}
 
-	// Validate login data
-	if err := h.validate.Struct(req); err != nil {
-		validationErrors := err.(validator.ValidationErrors)
-		errorMessages := make([]string, len(validationErrors))
-		for i, e := range validationErrors {
-			errorMessages[i] = translateValidationError(e)
-		}
+	validate := validator.New()
+	if err := validate.Struct(loginData); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-			"error":   "Validation error",
-			"details": errorMessages,
+			"error": "Geçersiz giriş bilgileri",
 		})
 	}
 
-	// Find partner by email
 	var partner models.Partner
-	err := h.collection.FindOne(ctx, bson.M{"email": req.Email}).Decode(&partner)
-	if err == mongo.ErrNoDocuments {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"error": "E-posta veya şifre hatalı",
-		})
-	}
+	err := h.collection.FindOne(context.Background(), bson.M{
+		"email": loginData.Email,
+	}).Decode(&partner)
 
-	// Compare passwords
-	err = bcrypt.CompareHashAndPassword([]byte(partner.Password), []byte(req.Password))
 	if err != nil {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-			"error": "E-posta veya şifre hatalı",
+		if err == mongo.ErrNoDocuments {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"error": "Geçersiz email veya şifre",
+			})
+		}
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Veritabanı hatası",
 		})
 	}
 
-	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+	if err := bcrypt.CompareHashAndPassword([]byte(partner.Password), []byte(loginData.Password)); err != nil {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+			"error": "Geçersiz email veya şifre",
+		})
+	}
+
+	// Create JWT token
+	token := jwt.New(jwt.SigningMethodHS256)
+	claims := token.Claims.(jwt.MapClaims)
+	claims["partnerId"] = partner.ID.Hex()
+	claims["exp"] = time.Now().Add(time.Hour * 72).Unix() // 3 gün geçerli
+
+	// Sign token
+	t, err := token.SignedString([]byte("your-secret-key")) // TODO: Move to config
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "Token oluşturulamadı",
+		})
+	}
+
+	// Clear password before sending response
+	partner.Password = ""
+
+	return c.JSON(fiber.Map{
 		"message": "Giriş başarılı",
-		"partner": partner.ToResponse(),
+		"token":   t,
+		"partner": partner,
 	})
 }
 

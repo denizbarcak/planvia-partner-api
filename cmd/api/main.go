@@ -5,9 +5,10 @@ import (
 	"log"
 	"time"
 
-	"planvia-partner-api/config"
-	"planvia-partner-api/internal/database"
-	"planvia-partner-api/internal/handlers"
+	"github.com/denizbarcak/planvia-partner-api/config"
+	"github.com/denizbarcak/planvia-partner-api/internal/database"
+	"github.com/denizbarcak/planvia-partner-api/internal/handlers"
+	"github.com/denizbarcak/planvia-partner-api/internal/middleware"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
@@ -55,14 +56,20 @@ func main() {
 	// Initialize handlers
 	db := client.Database(cfg.DBName)
 	partnerHandler := handlers.NewPartnerHandler(db)
+	reservationHandler := handlers.NewReservationHandler(db)
 
 	// Setup routes
 	api := app.Group("/api")
-	partners := api.Group("/partners")
 	
 	// Partner routes
+	partners := api.Group("/partners")
 	partners.Post("/register", partnerHandler.Register)
 	partners.Post("/login", partnerHandler.Login)
+
+	// Reservation routes (protected by auth middleware)
+	reservations := api.Group("/reservations", middleware.AuthMiddleware)
+	reservations.Post("/", reservationHandler.CreateReservation)
+	reservations.Get("/", reservationHandler.GetPartnerReservations)
 
 	// Start server
 	port := ":" + cfg.Port
