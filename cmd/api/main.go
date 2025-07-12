@@ -70,6 +70,8 @@ func main() {
 	reservations := api.Group("/reservations", middleware.AuthMiddleware)
 	reservations.Post("/", reservationHandler.CreateReservation)
 	reservations.Get("/", reservationHandler.GetPartnerReservations)
+	reservations.Put("/:id", reservationHandler.UpdateReservation)
+	reservations.Delete("/:id", reservationHandler.DeleteReservation)
 
 	// Start server
 	port := ":" + cfg.Port
